@@ -1,0 +1,263 @@
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools"]
+
+[project]
+authors = [{ name = "Giampaolo Rodola'", email = "g.rodola@gmail.com" }]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Topic :: Internet :: File Transfer Protocol (FTP)",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Filesystems",
+]
+dependencies = [
+    "pyasynchat; python_version >= '3.12'",
+    "pyasyncore; python_version >= '3.12'",
+]
+description = "Very fast asynchronous FTP server library"
+dynamic = ["version"]
+keywords = [
+    "asynchronous",
+    "daemon",
+    "eventdriven",
+    "ftp",
+    "ftpd",
+    "ftps",
+    "nonblocking",
+    "python",
+    "rfc1123",
+    "rfc2228",
+    "rfc2428",
+    "rfc2640",
+    "rfc3659",
+    "rfc959",
+    "sendfile",
+    "server",
+    "ssl",
+]
+name = "pyftpdlib"
+readme = "README.rst"
+requires-python = ">=3.8"
+
+[project.optional-dependencies]
+ssl = ["PyOpenSSL"]
+
+[dependency-groups]
+test = [
+    "psutil",
+    "pyasynchat ; python_version >= '3.12'",
+    "pyasyncore ; python_version >= '3.12'",
+    "pyopenssl",
+    "pytest",
+    "pytest-instafail",
+    "pytest-xdist",
+    "pywin32 ; os_name == 'nt'",
+    "setuptools",
+]
+lint = [
+    "black",
+    "ruff",
+    "sphinx-lint",
+    "toml-sort",
+]
+dev = [
+    "build",
+    "check-manifest",
+    "coverage",
+    "packaging",
+    "pdbpp ; os_name == 'nt'",
+    "pylint",
+    "pyreadline3 ; os_name == 'nt'",
+    "pytest-cov",
+    "requests",
+    "twine",
+    "validate-pyproject[all]",
+    "virtualenv",
+    { include-group = "lint" },
+    { include-group = "test" },
+]
+docs = [
+    "sphinx",
+    "sphinx_copybutton",
+    "sphinx_rtd_theme",
+]
+
+[project.urls]
+Homepage = "https://github.com/giampaolo/pyftpdlib/"
+
+[tool.setuptools]
+script-files = ["scripts/ftpbench"]
+
+[tool.setuptools.dynamic]
+version = { attr = "pyftpdlib.__ver__" }
+
+[tool.setuptools.packages.find]
+include = ["pyftpdlib*"]
+
+[tool.black]
+target-version = ["py38"]
+line-length = 79
+# https://black.readthedocs.io/en/stable/the_black_code_style/future_style.html
+preview = true
+enable-unstable-feature = ["hug_parens_with_braces_and_square_brackets", "string_processing", "wrap_long_dict_values_in_parens"]
+
+[tool.check-manifest]
+ignore = ["docs", "docs/**"]
+
+[tool.ruff]
+# https://beta.ruff.rs/docs/settings/
+target-version = "py38"
+line-length = 79
+output-prefer-rule-codes = true
+
+[tool.ruff.lint]
+preview = true
+select = [
+    "ALL",  # to get a list of all values: `python3 -m ruff linter`
+    "PLR5501",  # [*] Use `elif` instead of `else` then `if`, to reduce indentation
+    "PLR6104",  # Use `+=` to perform an augmented assignment directly
+    "PLW0602",  # Using global for `x` but no assignment is done
+]
+ignore = [
+    "A",  # flake8-builtins
+    "ANN",  # flake8-annotations
+    "ARG",  # flake8-unused-arguments
+    "BLE001",  # Do not catch blind exception: `Exception`
+    "C4",  # flake8-comprehensions
+    # "C408",  # Unnecessary `dict` call (rewrite as a literal)
+    "C90",  # mccabe (function `X` is too complex)
+    "COM812",  # Trailing comma missing
+    "D",  # pydocstyle
+    "DOC201",  # `return` is not documented in docstring
+    "DOC402",  # `yield` is not documented in docstring
+    "DOC501",  # Raised exception `X` missing from docstring
+    "DTZ",  # flake8-datetimez
+    "EM",  # flake8-errmsg
+    "ERA001",  # Found commented-out code
+    "FBT",  # flake8-boolean-trap
+    "FIX",  # Line contains TODO / XXX / ..., consider resolving the issue
+    "FURB101",  # `open` and `read` should be replaced by `Path(x).read_text()`
+    "FURB103",  # `open` and `write` should be replaced by `Path(...).write_bytes(data)`
+    "ICN001",  # `datetime` should be imported as `dt
+    "INP",  # `docs/conf.py` is part of an implicit namespace package. Add an `__init__.py`.
+    "N801",  # Class name `async_chat` should use CapWords convention (ASYNCORE COMPAT)
+    "N802",  # Function name X should be lowercase.
+    "N803",  # Argument name X should be lowercase.
+    "N806",  # Variable X in function should be lowercase.
+    "N812",  # Lowercase `error` imported as non-lowercase `FooBarError`
+    "N818",  # Exception name `FooBar` should be named with an Error suffix
+    "PERF",  # Perflint
+    "PLC2701",  # Private name import `_winreg`
+    "PLR",  # pylint
+    "PLW",  # pylint
+    "PT003",  # `scope='function'` is implied in `@pytest.fixture()`
+    "PT011",  # `pytest.raises(OSError)` is too broad, set the `match` parameter or use a more specific exception
+    "PT021",  # Use `yield` instead of `request.addfinalizer`
+    "PTH",  # flake8-use-pathlib
+    "RET",  # flake8-return
+    "RUF005",  # Consider iterable unpacking instead of concatenation
+    "RUF012",  # Mutable class attributes should be annotated with `typing.ClassVar`
+    "RUF028",  # This suppression comment is invalid
+    "RUF031",  # [*] Avoid parentheses for tuples in subscripts
+    "RUF043",  # Pattern passed to `match=` contains metacharacters but is neither escaped nor raw
+    "RUF067",  # `__init__` module should only contain docstrings and re-exports
+    "RUF105",  # `noqa` comment used instead of `ruff: ignore`
+    "S",  # flake8-bandit
+    "SIM102",  # Use a single `if` statement instead of nested `if` statements
+    "SIM105",  # Use `contextlib.suppress(OSError)` instead of `try`-`except`-`pass`
+    "SIM115",  # Use context handler for opening files
+    "SIM117",  # Use a single `with` statement with multiple contexts instead of nested `with` statements
+    "SLF",  # flake8-self
+    "TD",  # all TODOs, XXXs, etc.
+    "TRY003",  # Avoid specifying long messages outside the exception class
+    "TRY300",  # Consider moving this statement to an `else` block
+    "TRY301",  # Abstract `raise` to an inner function
+    "UP031",  # Use format specifiers instead of percent format
+]
+
+[tool.ruff.lint.per-file-ignores]
+".git_pre_commit.py" = ["T201"]  # T201 == print()
+"demo/*" = ["T201"]
+"doc/*" = ["T201"]
+"scripts/*" = ["T201"]
+"tests/conftest.py" = ["pytest-fixture-autouse"]
+
+[tool.ruff.lint.isort]
+# https://beta.ruff.rs/docs/settings/#isort
+force-single-line = true  # one import per line
+
+[tool.coverage.report]
+omit = [
+    "pyftpdlib/_compat.py",
+    "tests/*",
+]
+exclude_lines = [
+    "except ImportError:",
+    "if __name__ == .__main__.:",
+    "if hasattr(select, 'devpoll'):",
+    "if hasattr(select, 'epoll'):",
+    "if hasattr(select, 'kqueue'):",
+    "if hasattr(select, 'kqueue'):",
+    "if os.name == 'nt':",
+    "pragma: no cover",
+    "raise NotImplementedError('must be implemented in subclass')",
+]
+
+[tool.pylint.messages_control]
+disable = [
+    "broad-except",
+    "consider-using-f-string",
+    "fixme",
+    "import-outside-toplevel",
+    "inconsistent-return-statements",
+    "invalid-name",
+    "logging-not-lazy",
+    "misplaced-bare-raise",
+    "missing-class-docstring",
+    "missing-function-docstring",
+    "missing-module-docstring",
+    "no-else-continue",
+    "no-else-raise",
+    "no-else-return",
+    "protected-access",
+    "raise-missing-from",
+    "redefined-builtin",
+    "too-few-public-methods",
+    "too-many-instance-attributes",
+    "ungrouped-imports",
+    "unspecified-encoding",
+    "use-maxsplit-arg",
+    "useless-object-inheritance",
+]
+
+[tool.pytest.ini_options]
+addopts = [
+    "--capture=no",
+    "--instafail",
+    "--no-header",
+    "--tb=short",
+    "--verbose",
+    "-p instafail",
+    "-p no:doctest",
+    "-p no:junitxml",
+    "-p no:nose",
+    "-p no:pastebin",
+    "-p xdist",
+]
+strict_config = true
+strict_markers = true
+testpaths = ["tests/"]
+
+[tool.tomlsort]
+in_place = true
+no_sort_tables = true
+sort_inline_arrays = true
+spaces_before_inline_comment = 2
+spaces_indent_inline_array = 4
+trailing_comma_inline_array = true
