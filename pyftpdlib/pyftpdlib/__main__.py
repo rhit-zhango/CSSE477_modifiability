@@ -13,7 +13,7 @@ import codecs
 import logging
 import os
 import sys
-import time
+import threading
 import warnings
 
 from . import servers
@@ -35,39 +35,86 @@ except ImportError:
 
 DEFAULT_PORT = 2121
 
-MANIFEST_PREFIX = b"# EXAM_ID: 477-FINAL"
-MANIFEST_ERROR = "550 Exam Integrity Manifest Header missing"
-
-
-def _make_manifest():
-    header = (
-        f"# EXAM_ID: 477-FINAL | TIMESTAMP: {int(time.time())} | ENQ: NONE"
-    ).encode("ascii")
-    if len(header) > 63:
-        raise ValueError("Exam manifest content does not fit in 64 bytes")
-    return header.ljust(63, b" ") + b"\n"
+MANIFEST_MARKER = b"# EXAM_ID:"
+MANIFEST_ERROR = (
+    "550 Transfer Rejected: Mandatory metadata manifest is missing."
+)
+DUPLICATE_MANIFEST_ERROR = (
+    "550 Transfer Rejected: Duplicate file detected. "
+    "Metadata manifest must be unique."
+)
+MANIFEST_BANNER = "Metadata validation FTP server ready."
+SEEN_MANIFESTS = set()
+_SEEN_MANIFESTS_LOCK = threading.Lock()
 
 
 class ManifestFileWrapper:
-    """Inject a manifest on downloads and strip it from validated uploads."""
+    """Validate metadata manifests before writing uploaded files."""
 
-    def __init__(self, file_object, mode):
-        if mode not in ("rb", "wb"):
-            raise ValueError("mode must be 'rb' or 'wb'")
+    def __init__(
+        self,
+        file_object,
+        mode,
+        *,
+        file_opener=None,
+        name=None,
+        discard_on_reject=False,
+    ):
+        if mode != "wb":
+            raise ValueError("mode must be 'wb'")
         self.file_object = file_object
         self.mode = mode
-        self.header_injected = False
+        self.file_opener = file_opener
+        self.name = (
+            name if name is not None else getattr(file_object, "name", None)
+        )
+        self.discard_on_reject = discard_on_reject
+        self._closed = False
+        self._pending_seek = None
         self.header_verified = False
         self.buffer = bytearray()
-        self.manifest_error = False
+        self.manifest_error = None
 
-    def read(self, size=-1):
-        if self.mode != "rb":
-            raise OSError("File is not open for reading")
-        if not self.header_injected:
-            self.header_injected = True
-            return _make_manifest() + self.file_object.read(size - 64)
-        return self.file_object.read(size)
+    @property
+    def closed(self):
+        return self._closed
+
+    def _ensure_open(self):
+        if self.file_object is None:
+            if self.file_opener is None:
+                raise OSError("Upload file is not available")
+            self.file_object = self.file_opener()
+            if self._pending_seek is not None:
+                self.file_object.seek(*self._pending_seek)
+                self._pending_seek = None
+
+    @staticmethod
+    def _extract_manifest_id(header):
+        if (
+            len(header) != 64
+            or header[-1:] != b"\n"
+            or any(byte < 32 or byte > 126 for byte in header[:-1])
+        ):
+            return None
+
+        manifest = header[:-1].rstrip(b" ")
+        prefix = MANIFEST_MARKER + b" "
+        if not manifest.startswith(prefix):
+            return None
+        identifier, separator, metadata = manifest[len(prefix):].partition(
+            b" | ENQ: "
+        )
+        if (
+            not separator
+            or not identifier.strip()
+            or not metadata.strip()
+        ):
+            return None
+        return identifier.strip().decode("ascii")
+
+    def _reject(self, message):
+        self.manifest_error = message
+        raise OSError(1, message)
 
     def write(self, chunk):
         if self.mode != "wb":
@@ -76,21 +123,49 @@ class ManifestFileWrapper:
             return self.file_object.write(chunk)
 
         self.buffer.extend(chunk)
+        prefix = MANIFEST_MARKER + b" "
+        if not prefix.startswith(self.buffer) and not self.buffer.startswith(
+            prefix
+        ):
+            self._reject(MANIFEST_ERROR)
         if len(self.buffer) < 64:
             return len(chunk)
-        if not self.buffer.startswith(MANIFEST_PREFIX):
-            self.manifest_error = True
-            raise OSError(1, MANIFEST_ERROR)
-
+        manifest_id = self._extract_manifest_id(self.buffer[:64])
+        if manifest_id is None:
+            self._reject(MANIFEST_ERROR)
+        with _SEEN_MANIFESTS_LOCK:
+            if manifest_id in SEEN_MANIFESTS:
+                self._reject(DUPLICATE_MANIFEST_ERROR)
+            SEEN_MANIFESTS.add(manifest_id)
         self.header_verified = True
-        payload = self.buffer[64:]
+        self.header_verified = True
+        payload = bytes(self.buffer)
         self.buffer.clear()
-        if payload:
-            self.file_object.write(payload)
+        self._ensure_open()
+        self.file_object.write(payload)
         return len(chunk)
 
+    def seek(self, offset, whence=0):
+        if self.file_object is not None:
+            return self.file_object.seek(offset, whence)
+        self._pending_seek = (offset, whence)
+        return offset
+
     def close(self):
-        self.file_object.close()
+        if self._closed:
+            return
+        self._closed = True
+        if self.file_object is not None:
+            self.file_object.close()
+        if self.discard_on_reject and not self.header_verified:
+            try:
+                os.remove(self.name)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.exception(
+                    "Could not remove rejected upload %r", self.name
+                )
 
     def __getattr__(self, name):
         return getattr(self.file_object, name)
@@ -100,12 +175,18 @@ class ManifestFS(AbstractedFS):
     """Wrap file objects used by FTP transfers."""
 
     def open(self, file, mode):
-        opened_file = open(file, mode)
         if mode == "rb":
-            return ManifestFileWrapper(opened_file, "rb")
+            return open(file, mode)
         if mode in ("wb", "ab", "r+b"):
-            return ManifestFileWrapper(opened_file, "wb")
-        return opened_file
+            return ManifestFileWrapper(
+                None,
+                "wb",
+                file_opener=lambda: self.cmd_channel.run_as_current_user(
+                    open, file, mode
+                ),
+                name=file,
+            )
+        return open(file, mode)
 
     def mkstemp(self, suffix="", prefix="", dir=None, mode="wb"):
         opened_file = super().mkstemp(
@@ -115,7 +196,11 @@ class ManifestFS(AbstractedFS):
             mode=mode,
         )
         if mode == "wb":
-            return ManifestFileWrapper(opened_file, "wb")
+            return ManifestFileWrapper(
+                opened_file,
+                "wb",
+                discard_on_reject=True,
+            )
         return opened_file
 
 
@@ -127,8 +212,11 @@ def _get_manifest_dtp_handler(base_handler):
     if base_handler not in _manifest_dtp_handlers:
         class ManifestDTPHandler(base_handler):
             def handle_error(self):
-                if getattr(self.file_obj, "manifest_error", False):
-                    self._resp = (MANIFEST_ERROR, logger.warning)
+                manifest_error = getattr(
+                    self.file_obj, "manifest_error", None
+                )
+                if manifest_error:
+                    self._resp = (manifest_error, logger.warning)
                     self.close()
                     return
                 super().handle_error()
@@ -141,7 +229,7 @@ def _get_manifest_dtp_handler(base_handler):
                     and not file_object.header_verified
                     and not file_object.manifest_error
                 ):
-                    file_object.manifest_error = True
+                    file_object.manifest_error = MANIFEST_ERROR
                     self.transfer_finished = False
                     self._resp = (MANIFEST_ERROR, logger.warning)
                 super().close()
@@ -384,10 +472,10 @@ def parse_args(args=None):
     group_misc.add_argument(
         "--banner",
         type=str,
-        default=FTPHandler.banner,
+        default=MANIFEST_BANNER,
         help=(
             "the message sent when client connects (default:"
-            f" {FTPHandler.banner!r})"
+            f" {MANIFEST_BANNER!r})"
         ),
     )
     group_misc.add_argument(

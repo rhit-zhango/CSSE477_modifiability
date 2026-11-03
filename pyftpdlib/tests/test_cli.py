@@ -14,6 +14,7 @@ import pytest
 import pyftpdlib
 from pyftpdlib.__main__ import ManifestFS
 from pyftpdlib.__main__ import main
+from pyftpdlib.__main__ import SEEN_MANIFESTS
 from pyftpdlib.authorizers import DummyAuthorizer
 from pyftpdlib.handlers import TLS_FTPHandler
 from pyftpdlib.servers import FTPServer
@@ -248,6 +249,40 @@ class TestCommandLineParser(PyftpdlibTestCase):
 
 
 class TestManifestFilesystem:
+    def setup_method(self):
+        SEEN_MANIFESTS.clear()
+
+    class DummyChannel:
+        @staticmethod
+        def run_as_current_user(function, *args, **kwargs):
+            return function(*args, **kwargs)
+
+    def test_open_does_not_create_or_truncate_before_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fs = ManifestFS(directory, self.DummyChannel())
+            missing_path = os.path.join(directory, "new-upload")
+            missing_upload = fs.open(missing_path, "wb")
+            with pytest.raises(
+                OSError,
+                match="550 Transfer Rejected: Mandatory metadata manifest is missing",
+            ):
+                missing_upload.write(b"x" * 64)
+            missing_upload.close()
+            assert not os.path.exists(missing_path)
+
+            existing_path = os.path.join(directory, "existing-upload")
+            with open(existing_path, "wb") as existing_file:
+                existing_file.write(b"preserve this content")
+            existing_upload = fs.open(existing_path, "wb")
+            with pytest.raises(
+                OSError,
+                match="550 Transfer Rejected: Mandatory metadata manifest is missing",
+            ):
+                existing_upload.write(b"x" * 64)
+            existing_upload.close()
+            with open(existing_path, "rb") as existing_file:
+                assert existing_file.read() == b"preserve this content"
+
     def test_mkstemp_rejects_upload_without_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
             fs = ManifestFS(directory, None)
@@ -256,25 +291,74 @@ class TestManifestFilesystem:
             try:
                 with pytest.raises(
                     OSError,
-                    match="550 Exam Integrity Manifest Header missing",
+                    match="550 Transfer Rejected: Mandatory metadata manifest is missing",
                 ):
                     wrapped_file.write(b"x" * 64)
             finally:
                 wrapped_file.close()
 
-            with open(filename, "rb") as uploaded_file:
-                assert uploaded_file.read() == b""
+            assert not os.path.exists(filename)
 
-    def test_mkstemp_strips_valid_manifest(self):
+    def test_mkstemp_preserves_valid_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
             fs = ManifestFS(directory, None)
             wrapped_file = fs.mkstemp(dir=directory)
             filename = wrapped_file.name
-            manifest = b"# EXAM_ID: 477-FINAL".ljust(64, b" ")
+            manifest = self.make_manifest("OTHER")
             try:
                 wrapped_file.write(manifest + b"exam response")
             finally:
                 wrapped_file.close()
 
             with open(filename, "rb") as uploaded_file:
-                assert uploaded_file.read() == b"exam response"
+                assert uploaded_file.read() == manifest + b"exam response"
+            assert "OTHER" in SEEN_MANIFESTS
+
+    def test_split_manifest_is_validated_and_duplicate_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fs = ManifestFS(directory, None)
+            manifest = self.make_manifest("unique-file-id")
+            first = fs.mkstemp(dir=directory)
+            first_path = first.name
+            try:
+                first.write(manifest[:12])
+                first.write(manifest[12:] + b"first content")
+            finally:
+                first.close()
+
+            with open(first_path, "rb") as uploaded_file:
+                assert uploaded_file.read() == manifest + b"first content"
+
+            duplicate = fs.mkstemp(dir=directory)
+            duplicate_path = duplicate.name
+            try:
+                with pytest.raises(
+                    OSError,
+                    match="550 Transfer Rejected: Duplicate file detected",
+                ):
+                    duplicate.write(manifest + b"second content")
+            finally:
+                duplicate.close()
+            assert not os.path.exists(duplicate_path)
+
+    def test_mkstemp_rejects_malformed_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fs = ManifestFS(directory, None)
+            wrapped_file = fs.mkstemp(dir=directory)
+            filename = wrapped_file.name
+            malformed_header = b"# EXAM_ID:".ljust(64, b"x")
+            try:
+                with pytest.raises(
+                    OSError,
+                    match="550 Transfer Rejected: Mandatory metadata manifest is missing",
+                ):
+                    wrapped_file.write(malformed_header)
+            finally:
+                wrapped_file.close()
+
+            assert not os.path.exists(filename)
+
+    @staticmethod
+    def make_manifest(identifier):
+        header = f"# EXAM_ID: {identifier} | ENQ: NONE".encode("ascii")
+        return header.ljust(63, b" ") + b"\n"
