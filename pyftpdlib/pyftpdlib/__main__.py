@@ -107,6 +107,17 @@ class ManifestFS(AbstractedFS):
             return ManifestFileWrapper(opened_file, "wb")
         return opened_file
 
+    def mkstemp(self, suffix="", prefix="", dir=None, mode="wb"):
+        opened_file = super().mkstemp(
+            suffix=suffix,
+            prefix=prefix,
+            dir=dir,
+            mode=mode,
+        )
+        if mode == "wb":
+            return ManifestFileWrapper(opened_file, "wb")
+        return opened_file
+
 
 _manifest_dtp_handlers = {}
 

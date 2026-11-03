@@ -5,12 +5,14 @@
 import argparse
 import io
 import os
+import tempfile
 import warnings
 from unittest.mock import patch
 
 import pytest
 
 import pyftpdlib
+from pyftpdlib.__main__ import ManifestFS
 from pyftpdlib.__main__ import main
 from pyftpdlib.authorizers import DummyAuthorizer
 from pyftpdlib.handlers import TLS_FTPHandler
@@ -243,3 +245,36 @@ class TestCommandLineParser(PyftpdlibTestCase):
         ])
         assert ftpd.handler.tls_control_required is False
         assert ftpd.handler.tls_data_required is True
+
+
+class TestManifestFilesystem:
+    def test_mkstemp_rejects_upload_without_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fs = ManifestFS(directory, None)
+            wrapped_file = fs.mkstemp(dir=directory)
+            filename = wrapped_file.name
+            try:
+                with pytest.raises(
+                    OSError,
+                    match="550 Exam Integrity Manifest Header missing",
+                ):
+                    wrapped_file.write(b"x" * 64)
+            finally:
+                wrapped_file.close()
+
+            with open(filename, "rb") as uploaded_file:
+                assert uploaded_file.read() == b""
+
+    def test_mkstemp_strips_valid_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fs = ManifestFS(directory, None)
+            wrapped_file = fs.mkstemp(dir=directory)
+            filename = wrapped_file.name
+            manifest = b"# EXAM_ID: 477-FINAL".ljust(64, b" ")
+            try:
+                wrapped_file.write(manifest + b"exam response")
+            finally:
+                wrapped_file.close()
+
+            with open(filename, "rb") as uploaded_file:
+                assert uploaded_file.read() == b"exam response"
