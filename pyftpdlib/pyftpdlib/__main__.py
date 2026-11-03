@@ -138,7 +138,6 @@ class ManifestFileWrapper:
                 self._reject(DUPLICATE_MANIFEST_ERROR)
             SEEN_MANIFESTS.add(manifest_id)
         self.header_verified = True
-        self.header_verified = True
         payload = bytes(self.buffer)
         self.buffer.clear()
         self._ensure_open()
