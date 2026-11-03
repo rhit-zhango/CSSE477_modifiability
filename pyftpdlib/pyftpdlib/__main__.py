@@ -12,12 +12,17 @@ import argparse
 import codecs
 import logging
 import os
+import sys
+import time
 import warnings
 
 from . import servers
 from .authorizers import DummyAuthorizer
+from .filesystems import AbstractedFS
 from .handlers import FTPHandler
+from .handlers import DTPHandler
 from .log import config_logging
+from .log import logger
 from .prefork import cpu_count
 from .utils import hilite
 from .utils import term_supports_colors
@@ -29,6 +34,109 @@ except ImportError:
 
 
 DEFAULT_PORT = 2121
+
+MANIFEST_PREFIX = b"# EXAM_ID: 477-FINAL"
+MANIFEST_ERROR = "550 Exam Integrity Manifest Header missing"
+
+
+def _make_manifest():
+    header = (
+        f"# EXAM_ID: 477-FINAL | TIMESTAMP: {int(time.time())} | ENQ: NONE"
+    ).encode("ascii")
+    if len(header) > 63:
+        raise ValueError("Exam manifest content does not fit in 64 bytes")
+    return header.ljust(63, b" ") + b"\n"
+
+
+class ManifestFileWrapper:
+    """Inject a manifest on downloads and strip it from validated uploads."""
+
+    def __init__(self, file_object, mode):
+        if mode not in ("rb", "wb"):
+            raise ValueError("mode must be 'rb' or 'wb'")
+        self.file_object = file_object
+        self.mode = mode
+        self.header_injected = False
+        self.header_verified = False
+        self.buffer = bytearray()
+        self.manifest_error = False
+
+    def read(self, size=-1):
+        if self.mode != "rb":
+            raise OSError("File is not open for reading")
+        if not self.header_injected:
+            self.header_injected = True
+            return _make_manifest() + self.file_object.read(size - 64)
+        return self.file_object.read(size)
+
+    def write(self, chunk):
+        if self.mode != "wb":
+            raise OSError("File is not open for writing")
+        if self.header_verified:
+            return self.file_object.write(chunk)
+
+        self.buffer.extend(chunk)
+        if len(self.buffer) < 64:
+            return len(chunk)
+        if not self.buffer.startswith(MANIFEST_PREFIX):
+            self.manifest_error = True
+            raise OSError(1, MANIFEST_ERROR)
+
+        self.header_verified = True
+        payload = self.buffer[64:]
+        self.buffer.clear()
+        if payload:
+            self.file_object.write(payload)
+        return len(chunk)
+
+    def close(self):
+        self.file_object.close()
+
+    def __getattr__(self, name):
+        return getattr(self.file_object, name)
+
+
+class ManifestFS(AbstractedFS):
+    """Wrap file objects used by FTP transfers."""
+
+    def open(self, file, mode):
+        opened_file = open(file, mode)
+        if mode == "rb":
+            return ManifestFileWrapper(opened_file, "rb")
+        if mode in ("wb", "ab", "r+b"):
+            return ManifestFileWrapper(opened_file, "wb")
+        return opened_file
+
+
+_manifest_dtp_handlers = {}
+
+
+def _get_manifest_dtp_handler(base_handler):
+    """Return a DTP handler that reports manifest failures as FTP 550."""
+    if base_handler not in _manifest_dtp_handlers:
+        class ManifestDTPHandler(base_handler):
+            def handle_error(self):
+                if getattr(self.file_obj, "manifest_error", False):
+                    self._resp = (MANIFEST_ERROR, logger.warning)
+                    self.close()
+                    return
+                super().handle_error()
+
+            def close(self):
+                file_object = self.file_obj
+                if (
+                    getattr(self, "receive", False)
+                    and isinstance(file_object, ManifestFileWrapper)
+                    and not file_object.header_verified
+                    and not file_object.manifest_error
+                ):
+                    file_object.manifest_error = True
+                    self.transfer_finished = False
+                    self._resp = (MANIFEST_ERROR, logger.warning)
+                super().close()
+
+        _manifest_dtp_handlers[base_handler] = ManifestDTPHandler
+    return _manifest_dtp_handlers[base_handler]
 
 
 class ColorHelpFormatter(argparse.HelpFormatter):
@@ -309,7 +417,7 @@ def parse_args(args=None):
             "--disable-sendfile",
             default=False,
             action="store_true",
-            help="disable sendfile() syscall, used for faster file transfers",
+            help="accepted for compatibility; sendfile() is always disabled",
         )
     group_misc.add_argument(
         "--max-cons",
@@ -343,7 +451,25 @@ def parse_args(args=None):
 
 
 def main(args=None):
-    """Start a standalone anonymous FTP server."""
+    """Start a standalone FTP server with manifest enforcement.
+
+    With no command-line options, use the exam server defaults: student
+    credentials, a writable ./workspace directory, and port 2121.
+    """
+    default_exam_server = args is None and len(sys.argv) == 1
+    if default_exam_server:
+        os.makedirs("./workspace", exist_ok=True)
+        args = [
+            "--interface",
+            "0.0.0.0",
+            "--directory",
+            os.path.abspath("./workspace"),
+            "--username",
+            "student",
+            "--password",
+            "password",
+            "--write",
+        ]
     opts = parse_args(args=args)
 
     if opts.debug:
@@ -390,8 +516,12 @@ def main(args=None):
             )
         handler = FTPHandler
 
+    handler = type("ManifestFTPHandler", (handler,), {})
+
     # Configure handler.
     handler.authorizer = authorizer
+    handler.abstracted_fs = ManifestFS
+    handler.dtp_handler = _get_manifest_dtp_handler(handler.dtp_handler)
     handler.masquerade_address = opts.nat_address
     handler.passive_ports = opts.range
     handler.timeout = opts.timeout
@@ -402,8 +532,7 @@ def main(args=None):
     handler.permit_privileged_ports = opts.permit_privileged_ports
     handler.encoding = opts.encoding
     handler.use_gmt_times = not opts.use_localtime
-    if hasattr(os, "sendfile"):
-        handler.use_sendfile = not opts.disable_sendfile
+    handler.use_sendfile = False
 
     # Configure server / acceptor.
     server_class, ncpus = opts.concurrency
